@@ -64,7 +64,7 @@
     "name": "xinproof-runner",
     "readerRole": "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1",
     "script": "[format(variables('scriptTemplate'), parameters('xinproofUrl'), parameters('setupCode'), parameters('storageAccountName'), parameters('containerName'), parameters('prefix'))]",
-    "scriptTemplate": "#!/bin/bash\nset -euo pipefail # no -x: it would print the setup code into the boot log\nif [ ! -f /swapfile ]; then fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile swap swap defaults 0 0' >> /etc/fstab; fi\nexport DEBIAN_FRONTEND=noninteractive\napt-get update -q && apt-get install -yq docker.io\nsystemctl enable --now docker\ncurl -fsSL {0}/agent/install.sh | XINPROOF_SETUP_CODE='{1}' XINPROOF_LOCATIONS='azblob://{2}/{3}/{4}' sh"
+    "scriptTemplate": "#!/bin/bash\nset -euo pipefail # no -x: it would print the setup code into the boot log\nif [ ! -f /swapfile ]; then fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile swap swap defaults 0 0' >> /etc/fstab; fi\nexport DEBIAN_FRONTEND=noninteractive\napt-get update -q && apt-get install -yq docker.io\nsystemctl enable --now docker\ncurl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o /tmp/xinproof-install.sh {0}/agent/install.sh\nXINPROOF_SETUP_CODE='{1}' XINPROOF_LOCATIONS='azblob://{2}/{3}/{4}' sh /tmp/xinproof-install.sh"
   },
   "resources": [
     {

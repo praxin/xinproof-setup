@@ -99,7 +99,8 @@ Resources:
           if [ ! -f /swapfile ]; then fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile swap swap defaults 0 0' >> /etc/fstab; fi
           dnf install -y docker
           systemctl enable --now docker
-          curl -fsSL ${XinproofUrl}/agent/install.sh | XINPROOF_SETUP_CODE='${SetupCode}' XINPROOF_LOCATIONS='s3://${BucketName}/${Prefix}' sh
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o /tmp/xinproof-install.sh ${XinproofUrl}/agent/install.sh
+          XINPROOF_SETUP_CODE='${SetupCode}' XINPROOF_LOCATIONS='s3://${BucketName}/${Prefix}' sh /tmp/xinproof-install.sh
 
 Outputs:
   Tests:

@@ -18,7 +18,7 @@ PROJECT="$(gcloud config get-value project 2>/dev/null)"
 # run the setup detached and follow its log here.
 if [ -z "${XP_DETACHED:-}" ]; then
   SELF="$HOME/.xinproof-gcp-setup.sh"; LOGF="$HOME/xinproof-setup.log"
-  curl -fsSL "$URL/agent/gcp.sh" -o "$SELF"
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "$URL/agent/gcp.sh" -o "$SELF"
   : > "$LOGF" # exists before we follow it
   XP_DETACHED=1 setsid nohup bash "$SELF" "$@" >> "$LOGF" 2>&1 < /dev/null &
   PID=$!
@@ -98,7 +98,8 @@ if [ ! -f /swapfile ]; then fallocate -l 2G /swapfile && chmod 600 /swapfile && 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q && apt-get install -yq docker.io
 systemctl enable --now docker
-curl -fsSL "$(md xinproof-url)/agent/install.sh" | XINPROOF_SETUP_CODE="$(md xinproof-setup)" XINPROOF_LOCATIONS="$(md xinproof-locations)" sh
+curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o /tmp/xinproof-install.sh "$(md xinproof-url)/agent/install.sh"
+XINPROOF_SETUP_CODE="$(md xinproof-setup)" XINPROOF_LOCATIONS="$(md xinproof-locations)" sh /tmp/xinproof-install.sh
 EOS
 gcloud compute instances create xinproof-runner --project "$PROJECT" --zone "$ZONE" \
   --machine-type e2-micro --network "$NET" \
