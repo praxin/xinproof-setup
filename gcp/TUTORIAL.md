@@ -10,8 +10,10 @@ results (sizes, fingerprints, table names, row counts) leave your project.
 Click the ▶ button to run it:
 
 ```sh
-bash gcp/setup.sh
+curl -fsSL https://xinproof-cloud.xinproof.workers.dev/agent/gcp.sh | bash
 ```
 
-It shows an 8-letter code. Type it on the Runners page in Xinproof Cloud and
-click **Approve**. The script then finishes by itself in about a minute.
+It shows an 8-letter code and a link. Open the link and click **Approve**
+(or type the code on the Runners page). The script then finishes by itself in
+about a minute. If a step fails, it says which one, and the Runners page shows
+the error too.

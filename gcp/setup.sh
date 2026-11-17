@@ -13,12 +13,29 @@ say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 field() { python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$1"; }
 PROJECT="$(gcloud config get-value project 2>/dev/null)"
 [ -n "$PROJECT" ] || { echo "pick a project first: gcloud config set project <id>" >&2; exit 1; }
+say "Project: $PROJECT"
+
+# If any step fails, say where, and send the error to the Runners page too.
+LOG="$(mktemp)"; exec 2> >(tee -a "$LOG" >&2)
+STEP="connecting to Xinproof Cloud"; ID=""; SECRET=""
+report() {
+  local code=$?
+  [ "$code" -eq 0 ] && return
+  printf '\n\033[1;31mSetup stopped while %s.\033[0m\n' "$STEP" >&2
+  [ -n "$ID" ] || return
+  local msg; msg="$(tail -c 700 "$LOG" | sed 's/\x1b\[[0-9;]*m//g' | tr '\n' ' ')"
+  python3 -c 'import json,sys; print(json.dumps({"step": sys.argv[1], "message": sys.argv[2]}))' "$STEP" "$msg" |
+    curl -fsS -X POST -H "X-Pair-Secret: $SECRET" -H 'Content-Type: application/json' --data-binary @- "$URL/api/v1/agent/pair/$ID/error" >/dev/null 2>&1 &&
+    echo "The error is also shown on your Runners page." >&2 || true
+}
+trap report EXIT
 
 say "Connecting to Xinproof Cloud"
 P="$(curl -fsS -X POST "$URL/api/v1/agent/pair")"
 ID="$(printf '%s' "$P" | field id)"; SECRET="$(printf '%s' "$P" | field secret)"
 CODE="$(printf '%s' "$P" | field code)"; LINK="$(printf '%s' "$P" | field approve_url)"
 printf '\n    Your code:  \033[1;32m%s\033[0m\n\n    Approve it on your Runners page, or open:\n    %s\n\n' "$CODE" "$LINK"
+STEP="waiting for approval"
 printf 'Waiting for approval'
 SETUP=""; LOC=""
 for _ in $(seq 1 300); do
@@ -34,9 +51,11 @@ echo " approved: $LOC"
 BUCKET="${LOC#gs://}"; BUCKET="${BUCKET%%/*}"
 SA="xinproof-runner@$PROJECT.iam.gserviceaccount.com"
 
+STEP="turning on Compute Engine"
 say "1/4 Turning on Compute Engine in $PROJECT (if it isn't already)"
 gcloud services enable compute.googleapis.com --project "$PROJECT"
 
+STEP="creating the read-only identity"
 say "2/4 Read-only identity for gs://$BUCKET"
 gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 2>&1 || \
   gcloud iam service-accounts create xinproof-runner --project "$PROJECT" --display-name "Xinproof runner (read-only backups)"
@@ -45,6 +64,7 @@ for _ in 1 2 3 4 5; do
   sleep 5 # a new service account takes a moment to be usable
 done
 
+STEP="setting up the network"
 say "3/4 Network (outbound only)"
 if ! gcloud compute networks describe default --project "$PROJECT" >/dev/null 2>&1; then
   gcloud compute networks describe xinproof-runner-net --project "$PROJECT" >/dev/null 2>&1 || \
@@ -54,6 +74,7 @@ else
   NET=default
 fi
 
+STEP="creating the runner VM"
 say "4/4 Runner VM (e2-micro) in $ZONE"
 STARTUP=$(mktemp)
 cat > "$STARTUP" <<'EOS'
