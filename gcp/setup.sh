@@ -1,0 +1,78 @@
+#!/bin/bash
+# Xinproof runner for Google Cloud. Run it in Cloud Shell:
+#   bash gcp/setup.sh            (from the setup repo), or
+#   curl -fsSL https://xinproof-cloud.xinproof.workers.dev/agent/gcp.sh | bash
+# It shows a short code; approve it on your Runners page in Xinproof Cloud.
+# Then it creates, in the current project: a service account that can only
+# read your backup bucket, one e2-micro VM (free tier in us-central1, us-east1,
+# us-west1) using it, and the runner on it. No inbound ports are opened.
+set -euo pipefail
+URL="${XINPROOF_URL:-https://xinproof-cloud.xinproof.workers.dev}"
+ZONE="${1:-us-central1-a}"
+say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+field() { python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$1"; }
+PROJECT="$(gcloud config get-value project 2>/dev/null)"
+[ -n "$PROJECT" ] || { echo "pick a project first: gcloud config set project <id>" >&2; exit 1; }
+
+say "Connecting to Xinproof Cloud"
+P="$(curl -fsS -X POST "$URL/api/v1/agent/pair")"
+ID="$(printf '%s' "$P" | field id)"; SECRET="$(printf '%s' "$P" | field secret)"
+CODE="$(printf '%s' "$P" | field code)"; LINK="$(printf '%s' "$P" | field approve_url)"
+printf '\n    Your code:  \033[1;32m%s\033[0m\n\n    Approve it on your Runners page, or open:\n    %s\n\n' "$CODE" "$LINK"
+printf 'Waiting for approval'
+SETUP=""; LOC=""
+for _ in $(seq 1 300); do
+  R="$(curl -sS -H "X-Pair-Secret: $SECRET" "$URL/api/v1/agent/pair/$ID" || true)"
+  case "$(printf '%s' "$R" | field status)" in
+    approved) SETUP="$(printf '%s' "$R" | field setup_code)"; LOC="$(printf '%s' "$R" | field location)"; break ;;
+    pending) printf '.'; sleep 3 ;;
+    *) echo; echo "the code expired or was not approved; run this again for a new one" >&2; exit 1 ;;
+  esac
+done
+[ -n "$SETUP" ] || { echo; echo "timed out waiting for approval" >&2; exit 1; }
+echo " approved: $LOC"
+BUCKET="${LOC#gs://}"; BUCKET="${BUCKET%%/*}"
+SA="xinproof-runner@$PROJECT.iam.gserviceaccount.com"
+
+say "1/4 Turning on Compute Engine in $PROJECT (if it isn't already)"
+gcloud services enable compute.googleapis.com --project "$PROJECT"
+
+say "2/4 Read-only identity for gs://$BUCKET"
+gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 2>&1 || \
+  gcloud iam service-accounts create xinproof-runner --project "$PROJECT" --display-name "Xinproof runner (read-only backups)"
+for _ in 1 2 3 4 5; do
+  gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member "serviceAccount:$SA" --role roles/storage.objectViewer >/dev/null && break
+  sleep 5 # a new service account takes a moment to be usable
+done
+
+say "3/4 Network (outbound only)"
+if ! gcloud compute networks describe default --project "$PROJECT" >/dev/null 2>&1; then
+  gcloud compute networks describe xinproof-runner-net --project "$PROJECT" >/dev/null 2>&1 || \
+    gcloud compute networks create xinproof-runner-net --project "$PROJECT" --subnet-mode auto
+  NET=xinproof-runner-net
+else
+  NET=default
+fi
+
+say "4/4 Runner VM (e2-micro) in $ZONE"
+STARTUP=$(mktemp)
+cat > "$STARTUP" <<'EOS'
+#!/bin/bash
+set -euo pipefail # no -x: it would print the setup code into the boot log
+[ -f /etc/systemd/system/xinproof-agent.service ] && exit 0
+md() { curl -fsS -H 'Metadata-Flavor: Google' "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1"; }
+if [ ! -f /swapfile ]; then fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile swap swap defaults 0 0' >> /etc/fstab; fi
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q && apt-get install -yq docker.io
+systemctl enable --now docker
+curl -fsSL "$(md xinproof-url)/agent/install.sh" | XINPROOF_SETUP_CODE="$(md xinproof-setup)" XINPROOF_LOCATIONS="$(md xinproof-locations)" sh
+EOS
+gcloud compute instances create xinproof-runner --project "$PROJECT" --zone "$ZONE" \
+  --machine-type e2-micro --network "$NET" \
+  --image-family debian-12 --image-project debian-cloud --boot-disk-size 30GB --boot-disk-type pd-standard \
+  --service-account "$SA" --scopes cloud-platform --shielded-secure-boot \
+  --metadata "xinproof-url=$URL,xinproof-setup=$SETUP,xinproof-locations=$LOC" \
+  --metadata-from-file startup-script="$STARTUP"
+rm -f "$STARTUP"
+say "Done. The runner shows as Online on your Runners page in about two minutes and tests $LOC right away."
+echo "To remove it later: gcloud compute instances delete xinproof-runner --zone $ZONE && gcloud iam service-accounts delete $SA"

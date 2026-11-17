@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Xinproof runner. Restore-tests the database backups in one S3 bucket, inside
+  this AWS account, on the schedule set in Xinproof Cloud. Read-only access to
+  that bucket only; no inbound ports; only results (sizes, fingerprints, table
+  names, row counts) leave the account.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Your backups" }
+        Parameters: [BucketName, Prefix]
+      - Label: { default: "Runner (filled in for you)" }
+        Parameters: [SetupCode, XinproofUrl, InstanceType, LatestAmi]
+    ParameterLabels:
+      BucketName: { default: "S3 bucket with your backups" }
+      Prefix: { default: "Folder in the bucket (optional)" }
+      SetupCode: { default: "One-time setup code" }
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: For example my-company-db-backups
+    AllowedPattern: "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"
+    ConstraintDescription: an S3 bucket name
+  Prefix:
+    Type: String
+    Default: ""
+    Description: For example postgres/ (leave empty for the whole bucket)
+    AllowedPattern: "[A-Za-z0-9!_.*'()/-]*"
+  SetupCode:
+    Type: String
+    NoEcho: true
+    AllowedPattern: "xps_[A-Za-z0-9_-]{20,}"
+    Description: Filled in by the Launch button in Xinproof Cloud; works once, for one hour
+  XinproofUrl:
+    Type: String
+    Default: https://xinproof-cloud.xinproof.workers.dev
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+    Description: t3.micro is free-tier eligible; pick bigger for backups over a few GB
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Xinproof runner - read-only access to one backup bucket
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-backups
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}/*
+
+  RunnerProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref RunnerRole]
+
+  RunnerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Xinproof runner - no inbound connections at all
+
+  Runner:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmi
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref RunnerProfile
+      SecurityGroupIds: [!GetAtt RunnerSecurityGroup.GroupId]
+      MetadataOptions: { HttpTokens: required }
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3, Encrypted: true }
+      Tags:
+        - { Key: Name, Value: xinproof-runner }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail # no -x: it would print the setup code into the boot log
+          # Room to restore on a small machine.
+          if [ ! -f /swapfile ]; then fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile swap swap defaults 0 0' >> /etc/fstab; fi
+          dnf install -y docker
+          systemctl enable --now docker
+          curl -fsSL ${XinproofUrl}/agent/install.sh | XINPROOF_SETUP_CODE='${SetupCode}' XINPROOF_LOCATIONS='s3://${BucketName}/${Prefix}' sh
+
+Outputs:
+  Tests:
+    Description: What this runner tests (scheduled nightly; the first test starts right away)
+    Value: !Sub s3://${BucketName}/${Prefix}
+  Instance:
+    Value: !Ref Runner

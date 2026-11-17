@@ -1,0 +1,259 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Xinproof runner: restore-tests the database backups in one storage container, inside this subscription, on the schedule set in Xinproof Cloud. Read-only access to that storage account only; no inbound ports."
+  },
+  "parameters": {
+    "setupCode": {
+      "type": "secureString",
+      "metadata": {
+        "description": "One-time setup code from Xinproof Cloud (filled in by the Deploy button)"
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Storage account that holds your backups"
+      }
+    },
+    "containerName": {
+      "type": "string",
+      "metadata": {
+        "description": "Container with your backups"
+      }
+    },
+    "prefix": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Folder inside the container (optional), e.g. postgres/"
+      }
+    },
+    "storageResourceGroup": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().name]",
+      "metadata": {
+        "description": "Resource group of the storage account (deploy into that resource group and leave this as is)"
+      }
+    },
+    "runnerSize": {
+      "type": "string",
+      "defaultValue": "Standard_B2ats_v2",
+      "metadata": {
+        "description": "Standard_B2ats_v2 is free-tier eligible; pick bigger for backups over a few GB"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "xinproofUrl": {
+      "type": "string",
+      "defaultValue": "https://xinproof-cloud.xinproof.workers.dev"
+    },
+    "adminPassword": {
+      "type": "secureString",
+      "defaultValue": "[concat('Xp-', uniqueString(newGuid()), '!', toUpper(uniqueString(newGuid())))]",
+      "metadata": {
+        "description": "Leave as is: generated, never used"
+      }
+    }
+  },
+  "variables": {
+    "name": "xinproof-runner",
+    "readerRole": "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1",
+    "script": "[format(variables('scriptTemplate'), parameters('xinproofUrl'), parameters('setupCode'), parameters('storageAccountName'), parameters('containerName'), parameters('prefix'))]",
+    "scriptTemplate": "#!/bin/bash\nset -euo pipefail # no -x: it would print the setup code into the boot log\nif [ ! -f /swapfile ]; then fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile swap swap defaults 0 0' >> /etc/fstab; fi\nexport DEBIAN_FRONTEND=noninteractive\napt-get update -q && apt-get install -yq docker.io\nsystemctl enable --now docker\ncurl -fsSL {0}/agent/install.sh | XINPROOF_SETUP_CODE='{1}' XINPROOF_LOCATIONS='azblob://{2}/{3}/{4}' sh"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(variables('name'), '-nsg')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": []
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(variables('name'), '-vnet')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', concat(variables('name'), '-nsg'))]"
+      ],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.77.0.0/24"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "runner",
+            "properties": {
+              "addressPrefix": "10.77.0.0/27",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', concat(variables('name'), '-nsg'))]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(variables('name'), '-ip')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static"
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(variables('name'), '-nic')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', concat(variables('name'), '-vnet'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', concat(variables('name'), '-ip'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ip",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', concat(variables('name'), '-vnet'), 'runner')]"
+              },
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat(variables('name'), '-ip'))]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-09-01",
+      "name": "[variables('name')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('name'), '-nic'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('runnerSize')]"
+        },
+        "osProfile": {
+          "computerName": "[variables('name')]",
+          "adminUsername": "xinproof",
+          "adminPassword": "[parameters('adminPassword')]",
+          "customData": "[base64(variables('script'))]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "0001-com-ubuntu-server-jammy",
+            "sku": "22_04-lts-gen2",
+            "version": "latest"
+          },
+          "osDisk": {
+            "createOption": "FromImage",
+            "diskSizeGB": 30,
+            "managedDisk": {
+              "storageAccountType": "Standard_LRS"
+            },
+            "deleteOption": "Delete"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('name'), '-nic'))]",
+              "properties": {
+                "deleteOption": "Delete"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "xinproof-runner-access",
+      "resourceGroup": "[parameters('storageResourceGroup')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', variables('name'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "account": {
+            "value": "[parameters('storageAccountName')]"
+          },
+          "principalId": {
+            "value": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('name')), '2023-09-01', 'full').identity.principalId]"
+          },
+          "role": {
+            "value": "[variables('readerRole')]"
+          },
+          "vmId": {
+            "value": "[resourceId('Microsoft.Compute/virtualMachines', variables('name'))]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "account": {
+              "type": "string"
+            },
+            "principalId": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "vmId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[concat('Microsoft.Storage/storageAccounts/', parameters('account'))]",
+              "name": "[guid(parameters('vmId'), parameters('account'), parameters('role'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', parameters('role'))]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "tests": {
+      "type": "string",
+      "value": "[concat('azblob://', parameters('storageAccountName'), '/', parameters('containerName'), '/', parameters('prefix'))]"
+    }
+  }
+}
