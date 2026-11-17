@@ -19,9 +19,10 @@ PROJECT="$(gcloud config get-value project 2>/dev/null)"
 if [ -z "${XP_DETACHED:-}" ]; then
   SELF="$HOME/.xinproof-gcp-setup.sh"; LOGF="$HOME/xinproof-setup.log"
   curl -fsSL "$URL/agent/gcp.sh" -o "$SELF"
-  XP_DETACHED=1 setsid nohup bash "$SELF" "$@" > "$LOGF" 2>&1 < /dev/null &
+  : > "$LOGF" # exists before we follow it
+  XP_DETACHED=1 setsid nohup bash "$SELF" "$@" >> "$LOGF" 2>&1 < /dev/null &
   PID=$!
-  tail -n +1 -f "$LOGF" --pid="$PID" 2>/dev/null
+  tail -n +1 -F "$LOGF" --pid="$PID" 2>/dev/null || { sleep 1; cat "$LOGF"; echo "Setup continues in the background; follow it with: tail -f $LOGF"; }
   exit 0
 fi
 say "Project: $PROJECT"
