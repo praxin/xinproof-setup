@@ -13,6 +13,17 @@ say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 field() { python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]) or "")' "$1"; }
 PROJECT="$(gcloud config get-value project 2>/dev/null)"
 [ -n "$PROJECT" ] || { echo "pick a project first: gcloud config set project <id>" >&2; exit 1; }
+
+# Keep going even if this tab is closed or left (e.g. to approve the code):
+# run the setup detached and follow its log here.
+if [ -z "${XP_DETACHED:-}" ]; then
+  SELF="$HOME/.xinproof-gcp-setup.sh"; LOGF="$HOME/xinproof-setup.log"
+  curl -fsSL "$URL/agent/gcp.sh" -o "$SELF"
+  XP_DETACHED=1 setsid nohup bash "$SELF" "$@" > "$LOGF" 2>&1 < /dev/null &
+  PID=$!
+  tail -n +1 -f "$LOGF" --pid="$PID" 2>/dev/null
+  exit 0
+fi
 say "Project: $PROJECT"
 
 # If any step fails, say where, and send the error to the Runners page too.
@@ -34,7 +45,7 @@ say "Connecting to Xinproof Cloud"
 P="$(curl -fsS -X POST "$URL/api/v1/agent/pair")"
 ID="$(printf '%s' "$P" | field id)"; SECRET="$(printf '%s' "$P" | field secret)"
 CODE="$(printf '%s' "$P" | field code)"; LINK="$(printf '%s' "$P" | field approve_url)"
-printf '\n    Your code:  \033[1;32m%s\033[0m\n\n    Approve it on your Runners page, or open:\n    %s\n\n' "$CODE" "$LINK"
+printf '\n    Your code:  \033[1;32m%s\033[0m\n\n    Approve it on your Runners page, or open (in a new tab):\n    %s\n\n    Setup keeps going even if you close this tab. Log: ~/xinproof-setup.log\n\n' "$CODE" "$LINK"
 STEP="waiting for approval"
 printf 'Waiting for approval'
 SETUP=""; LOC=""
