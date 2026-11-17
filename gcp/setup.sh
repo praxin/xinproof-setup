@@ -87,7 +87,9 @@ else
 fi
 
 STEP="creating the runner VM"
-say "4/4 Runner VM (e2-micro) in $ZONE"
+# Its own name, so a project can have several runners (one per bucket, say).
+VM="xinproof-runner-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+say "4/4 Runner VM $VM (e2-micro) in $ZONE"
 STARTUP=$(mktemp)
 cat > "$STARTUP" <<'EOS'
 #!/bin/bash
@@ -101,7 +103,7 @@ systemctl enable --now docker
 curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o /tmp/xinproof-install.sh "$(md xinproof-url)/agent/install.sh"
 XINPROOF_SETUP_CODE="$(md xinproof-setup)" XINPROOF_LOCATIONS="$(md xinproof-locations)" sh /tmp/xinproof-install.sh
 EOS
-gcloud compute instances create xinproof-runner --project "$PROJECT" --zone "$ZONE" \
+gcloud compute instances create "$VM" --project "$PROJECT" --zone "$ZONE" \
   --machine-type e2-micro --network "$NET" \
   --image-family debian-12 --image-project debian-cloud --boot-disk-size 30GB --boot-disk-type pd-standard \
   --service-account "$SA" --scopes cloud-platform --shielded-secure-boot \
@@ -109,4 +111,5 @@ gcloud compute instances create xinproof-runner --project "$PROJECT" --zone "$ZO
   --metadata-from-file startup-script="$STARTUP"
 rm -f "$STARTUP"
 say "Done. The runner shows as Online on your Runners page in about two minutes and tests $LOC right away."
-echo "To remove it later: gcloud compute instances delete xinproof-runner --zone $ZONE && gcloud iam service-accounts delete $SA"
+echo "To remove it later: gcloud compute instances delete $VM --zone $ZONE"
+echo "(The read-only service account $SA is shared by all runners in this project; delete it after the last one.)"
