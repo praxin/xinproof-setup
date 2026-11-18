@@ -78,13 +78,11 @@ done
 
 STEP="setting up the network"
 say "3/4 Network (outbound only)"
-if ! gcloud compute networks describe default --project "$PROJECT" >/dev/null 2>&1; then
-  gcloud compute networks describe xinproof-runner-net --project "$PROJECT" >/dev/null 2>&1 || \
-    gcloud compute networks create xinproof-runner-net --project "$PROJECT" --subnet-mode auto
-  NET=xinproof-runner-net
-else
-  NET=default
-fi
+# Its own network with no firewall rules: Google denies all incoming traffic
+# unless a rule allows it (the "default" network usually allows SSH from anywhere).
+NET=xinproof-runner-net
+gcloud compute networks describe "$NET" --project "$PROJECT" >/dev/null 2>&1 || \
+  gcloud compute networks create "$NET" --project "$PROJECT" --subnet-mode auto
 
 STEP="creating the runner VM"
 # Its own name, so a project can have several runners (one per bucket, say).
